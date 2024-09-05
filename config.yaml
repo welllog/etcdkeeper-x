@@ -1,0 +1,13 @@
+host: 0.0.0.0
+port: 8010
+etcds:
+  # first default
+  - endpoints: 127.0.0.1:2379
+    separator: /
+    auth: false
+    passwd:
+    tls:
+      enable: false
+      certFile:
+      keyFile:
+      trustedCAFile:

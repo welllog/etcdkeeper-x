@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 )
 
@@ -42,7 +41,6 @@ func Register(name string, provide Provider) {
 
 type Manager struct {
 	cookieName  string     //private cookiename
-	lock        sync.Mutex // protects session
 	provider    Provider
 	maxlifetime int64
 }
@@ -57,8 +55,6 @@ func NewManager(provideName, cookieName string, maxlifetime int64) (*Manager, er
 
 //get Session
 func (manager *Manager) SessionStart(w http.ResponseWriter, r *http.Request) (session Session) {
-	manager.lock.Lock()
-	defer manager.lock.Unlock()
 	cookie, err := r.Cookie(manager.cookieName)
 	if err != nil || cookie.Value == "" {
 		sid := manager.sessionId()
@@ -78,8 +74,6 @@ func (manager *Manager) SessionDestroy(w http.ResponseWriter, r *http.Request) {
 	if err != nil || cookie.Value == "" {
 		return
 	} else {
-		manager.lock.Lock()
-		defer manager.lock.Unlock()
 		manager.provider.SessionDestroy(cookie.Value)
 		expiration := time.Now()
 		cookie := http.Cookie{Name: manager.cookieName, Path: "/", HttpOnly: true, Expires: expiration, MaxAge: -1}
@@ -88,8 +82,6 @@ func (manager *Manager) SessionDestroy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (manager *Manager) GC() {
-	manager.lock.Lock()
-	defer manager.lock.Unlock()
 	manager.provider.SessionGC(manager.maxlifetime)
 	time.AfterFunc(time.Duration(manager.maxlifetime)*time.Second, func() { manager.GC() })
 }

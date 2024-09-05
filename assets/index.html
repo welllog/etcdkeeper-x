@@ -3,19 +3,19 @@
 <head>
 	<meta charset="UTF-8">
 	<title>ETCD Keeper</title>
-	<link rel="shortcut icon" href="../framework/favicon.ico">
-	<link rel="stylesheet" type="text/css" href="../framework/easyui/themes/metro/easyui.css">
-	<link rel="stylesheet" type="text/css" href="../framework/easyui/themes/icon.css">
-	<link rel="stylesheet" type="text/css" href="../framework/custom/css/style.css">
+	<link rel="shortcut icon" href="framework/favicon.ico">
+	<link rel="stylesheet" type="text/css" href="framework/easyui/themes/metro/easyui.css">
+	<link rel="stylesheet" type="text/css" href="framework/easyui/themes/icon.css">
+	<link rel="stylesheet" type="text/css" href="framework/custom/css/style.css">
 	<!-- 此行代码解决ie8中iframe里嵌套此页面会导致jquery错误-->
 	<script>document.documentElement.focus();</script>
-	<script type="text/javascript" src="../framework/easyui/jquery.min.js"></script>
-	<script type="text/javascript" src="../framework/easyui/jquery.easyui.min.js"></script>
-	<script type="text/javascript" src="../framework/easyui/locale/easyui-lang-en.js"></script>
-	<script type="text/javascript" src="../framework/jquery/jquery.json-2.2.js"></script>
-	<script type="text/javascript" src="../framework/custom/js/common.js"></script>
-	<script type="text/javascript" src="../framework/js.cookie-2.1.4.min.js"></script>
-	<script type="text/javascript" src="../framework/ace/ace.js" charset="utf-8"></script>
+	<script type="text/javascript" src="framework/easyui/jquery.min.js"></script>
+	<script type="text/javascript" src="framework/easyui/jquery.easyui.min.js"></script>
+	<script type="text/javascript" src="framework/easyui/locale/easyui-lang-en.js"></script>
+	<script type="text/javascript" src="framework/jquery/jquery.json-2.2.js"></script>
+	<script type="text/javascript" src="framework/custom/js/common.js"></script>
+	<script type="text/javascript" src="framework/js.cookie-2.1.4.min.js"></script>
+	<script type="text/javascript" src="framework/ace/ace.js" charset="utf-8"></script>
 	<style>
 		#value {
 			position: absolute;
@@ -29,9 +29,9 @@
 	</style>
 </head>
 <body style="overflow: hidden;">
-	<h2><img src="../framework/logo.png" width="20" style="position:relative;top:3px;"></img><font color="00a0e9"> ETCD</font> Keeper <span id="ver" style="border: 1px solid #D4D4D4;border-radius: 5px;cursor:pointer;">v3</span></h2>
+	<h2><img src="framework/logo.png" width="20" style="position:relative;top:3px;"></img><span style="color:#00a0e9;"> ETCD</span> Keeper-x v3</h2>
 	<div class="noborder">
-		<img id="userButton" src="../framework/easyui/themes/icons/user.png" width="20" style="position:relative;top:7px;cursor:pointer;"></img>
+		<img id="userButton" src="framework/easyui/themes/icons/user.png" width="20" style="position:relative;top:7px;cursor:pointer;"></img>
 		<input id="etcdAddr" class="easyui-textbox" data-options="prompt:'127.0.0.1:2379',onChange:changeHost,iconCls:'icon-server',iconAlign:'left'" style="width:360px;height:30px;"/>
 	</div>
 	<div style="margin:20px 0;"></div>
@@ -43,7 +43,7 @@
 			<div id="value"></div>
 		</div>
 	</div>
-	
+
 	<div id="footer" style="padding:5px;color:#777;">&nbsp;</div>
 	<div id="westTools">
 		<a href="javascript:void(0)" class="icon-path" style="margin-right:4px;" onclick="changeTreeMode();" title="Tree mode"></a>
@@ -61,7 +61,7 @@
 	<div id="treeNodeMenu" class="easyui-menu" style="width:150px;">
 		<div onclick="removeNode()" data-options="iconCls:'icon-remove'">Remove Node</div>
 	</div>
-	
+
 	<div id="cnode" class="easyui-window" title="Create node" data-options="modal:true,closed:true" style="width:650px;height:480px;padding:10px;">
 		<div style="padding:10px 40px 20px 40px">
 			<form id="cnodeForm">
@@ -94,7 +94,7 @@
 			</div>
 	    </div>
 	</div>
-	
+
 	<div id="userinfo" class="easyui-window" title="Authentication" data-options="modal:true,closed:true" style="width:350px;height:220px;padding:10px;">
 		<div style="padding:10px 40px 20px 40px">
 			<table cellpadding="10">
@@ -119,8 +119,8 @@
 		<span id="statusMember" style="margin-left: 10px;"></span>
 		<span style="margin-left: 10px;">ETCD Keeper 0.7.6</span>
 	</div>
-	
-	<div id="modeMenu" style="">
+
+	<div id="modeMenu">
 		<div id="mode_text" onclick="changeMode('text')">text</div>
 		<div id="mode_toml" onclick="changeMode('toml')">toml</div>
 		<div id="mode_ini" onclick="changeMode('ini')">ini</div>
@@ -131,17 +131,12 @@
 		<div id="mode_json" onclick="changeMode('json')">json</div>
 	</div>
 
-    <div id="versionMenu" class="easyui-menu">
-        <div id="version_3" onclick="selVersion('3')">version 3</div>
-        <div id="version_2" onclick="selVersion('2')">version 2</div>
-    </div>
-	
 	<script>
 		resizeWindow();
 		$(window).resize(function(){ // FIXME: invalid
 			resizeWindow();
 		});
-		
+
 		function resizeWindow(){
 			$('#elayout').height(($(window).height() - 128) + 'px')
 		}
@@ -149,57 +144,17 @@
 		var timeout = 5000 // milliseconds
 		var separator = '';
 		var serverBase = '/v3';
+		var version = '3';
 		var etcdBase = Cookies.get('etcd-endpoint');
 		if(typeof(etcdBase) === 'undefined') {
 			etcdBase = '127.0.0.1:2379';
 		}
 
-        // version switch
-        var version = Cookies.get('etcd-version');
-        if(typeof(version) === 'undefined') {
-            version = '3';
-        }
-        setServerBase(version);
-        $(function(){
-            $('#ver').bind('click',function(e){
-                e.preventDefault();
-                $('#versionMenu').menu('show', {
-                    left: e.pageX,
-                    top: e.pageY
-                });
-            });
+		$(function(){
 			$('#userButton').bind('click',function(e){
-                $('#userinfo').window('open');
-            });
-        });
-        function selVersion(ver) {
-            setServerBase(ver);
-            version = ver;
-            connect();
-            Cookies.set('etcd-version', version, {expires: 30});
-
-            $('#versionMenu').menu('setIcon', {
-                target: $('#version_2')[0],
-                iconCls: ''
-            });
-            $('#versionMenu').menu('setIcon', {
-                target: $('#version_3')[0],
-                iconCls: ''
-            });
-            $('#versionMenu').menu('setIcon', {
-                target: $('#version_' + ver)[0],
-                iconCls: 'icon-ok'
-            });
-        }
-        function setServerBase(ver) {
-            if (ver === '3') {
-                $('#ver').html('v3');
-                serverBase = '/v3';
-            } else {
-                $('#ver').html('v2');
-                serverBase = '/v2';
-            }
-        }
+				$('#userinfo').window('open');
+			});
+		});
 
 		var tree = [];
 		var idCount = 0;
@@ -214,15 +169,7 @@
 		if (typeof(treeMode) === 'undefined') {
 			treeMode = 'list';
 		}
-		if (version === '2') {
-		    treeMode = 'path'
-		}
-		//var autoFormat = Cookies.get('auto-format');
-		//if(typeof(autoFormat) === 'undefined') {
-			//autoFormat = 'false';
-		//}
-		
-		// get separator
+
 		$.ajax({
 			type: 'GET',
 			timeout: timeout,
@@ -237,18 +184,14 @@
 				$.messager.alert('Error', $.toJSON(err), 'error');
 			}
 		});
-		
+
 		$(document).ready(function() {
 			editor.setTheme('ace/theme/github');
 			editor.getSession().setMode('ace/mode/' + aceMode);
 			changeMode(aceMode);
 			init();
-            $('#versionMenu').menu('setIcon', {
-                target: $('#version_' + version)[0],
-                iconCls: 'icon-ok'
-            });
 		});
-		
+
 		function init() {
 			$('#etcdAddr').textbox('setValue', etcdBase);
 			var t = $('#etree').tree({
@@ -258,7 +201,7 @@
 				onContextMenu:showMenu
 			});
 		}
-		
+
 		function changeHost(newValue, oldValue) {
 			if (newValue === '') {
 				$.messager.alert('Error','ETCD address is empty.','error');
@@ -268,7 +211,7 @@
 				connect();
 			}
 		}
-		
+
 		function connect() {
 			var status = 'ok';
 			var uname = $('#uname').textbox('getValue');
@@ -310,7 +253,7 @@
 					$.messager.alert('Error', $.toJSON(err), 'error');
 				}
 			});
-			
+
 			if (status === 'ok') {
 				reload();
 			} else if (status === 'login') {
@@ -323,7 +266,7 @@
 				$('#etree').tree('loadData', []);
 			}
 		}
-		
+
 		function reload() {
 			var rootNode = {
 				id      : getId(),
@@ -339,14 +282,14 @@
 			showNode($('#etree').tree('getRoot'));
 			resetValue();
 		}
-		
+
 		function resetValue() {
 			$('#elayout').layout('panel','center').panel('setTitle', separator);
 			editor.getSession().setValue('');
 			editor.setReadOnly(false);
 			$('#footer').html('&nbsp;');
 		}
-		
+
 		function showNode(node) {
 			$('#elayout').layout('panel','center').panel('setTitle', node.path);
 			editor.getSession().setValue('');
@@ -385,18 +328,12 @@
 				if (node.children.length > 0) {
 					$('#etree').tree(node.state === 'closed' ? 'expand' : 'collapse', node.target);
 				}
-				if (version === '2') {
-					if (node.state === 'closed') {
-						return
-					}
-					editor.setReadOnly(true);
-                }
 
 				$('#footer').html('&nbsp;');
 				// clear child node
 				var children = $('#etree').tree('getChildren', node.target);
 				//if (node.state === 'closed' || children.length === 0) {
-					
+
 				//}
 				var url = '';
 				if (treeMode === 'list') {
@@ -421,11 +358,11 @@
 								changeModeBySuffix(node.path);
 							}
 							var arr = [];
-							
-							if (data.node.nodes) {									
+
+							if (data.node.nodes) {
 								// refresh child node
 								for (var i in data.node.nodes) {
-									var newData = getNode(data.node.nodes[i]);	
+									var newData = getNode(data.node.nodes[i]);
 									arr.push(newData);
 								}
 								$('#etree').tree('append', {
@@ -437,7 +374,7 @@
 							for(var n in children) {
 								$('#etree').tree('remove', children[n].target);
 							}
-						} 
+						}
 					},
 					error: function(err) {
 						$.messager.alert('Error',$.toJSON(err),'error');
@@ -445,7 +382,7 @@
 				});
 			}
 		}
-		
+
 		function getNode(n) {
 			var text = '';
 			if (treeMode === 'list') {
@@ -475,18 +412,13 @@
 			}
 			return obj
 		}
-		
+
 		function showMenu(e, node) {
 			e.preventDefault();
 			$('#etree').tree('select',node.target);
 			var mid = "treeNodeMenu";
 			if (treeMode === 'path') {
 				mid = 'treeDirMenu';
-				if (version === '2') {
-                    if (node.dir !== true) {
-                        mid = "treeNodeMenu";
-                    }
-				}
 			} else {
 				if (node.dir === true) {
 					mid = 'treeDirMenu';
@@ -497,7 +429,7 @@
 				top: e.pageY
 			});
 		}
-		
+
 		function saveValue() {
 			var node = $('#etree').tree('getSelected');
 			$.ajax({
@@ -525,14 +457,14 @@
 				}
 			});
 		}
-		
+
 		function createNode() {
 			var node = $('#etree').tree('getSelected');
 			var nodePath = node.path;
 			if (nodePath === separator) {
 				nodePath = ''
 			}
-			
+
 			if (treeMode == 'list') { // list mode
 				if ($('#cnodeForm').form('validate')) {
 					var createNodePath = $('#name').textbox('getValue');
@@ -566,7 +498,7 @@
 								var objNode = nodeExist(obj.path);
 								if (objNode === null) {
 									newData.push(obj);
-								
+
 									$('#etree').tree('append', {
 										parent: node.target,
 										data: newData
@@ -591,7 +523,7 @@
 							pathArr.push(inputArr[i]);
 						}
 					}
-					
+
 					$.ajax({
 						type: 'PUT',
 						timeout: timeout,
@@ -657,7 +589,7 @@
 									data: newData
 								});
 							}
-							
+
 							$('#cvalue').textbox('enable','none');
 							$('#cnodeForm').form('reset');
 							$('#ttl').numberbox('setValue', '');
@@ -669,7 +601,7 @@
 				}
 			}
 		}
-		
+
 		function nodeExist(p) {
 			for (var i=0;i<=idCount;i++) {
 				var node = $('#etree').tree('find', i);
@@ -679,7 +611,7 @@
 			}
 			return null;
 		}
-		
+
 		function removeNode() {
 			var node = $('#etree').tree('getSelected');
 			$.messager.confirm('Confirm', 'Remove ' + node.text + '?', function(r){
@@ -695,9 +627,9 @@
 							resetValue();
 							if (data === 'ok') {
 								alertMessage('Delete success.');
-								
+
 								var pnode = $('#etree').tree('getParent', node.target);
-								
+
 								$('#etree').tree('remove', node.target);
 
 								if (version === '3') {
@@ -720,7 +652,7 @@
 				}
 			});
 		}
-		
+
 		function selDir(item) {
 			if (item.value === 'true') {
 				$('#cvalue').textbox('disable','none');
@@ -728,7 +660,7 @@
 				$('#cvalue').textbox('enable','none');
 			}
 		}
-		
+
 		function alertMessage(msg) {
 			$.messager.show({
 				title:'Message',
@@ -741,11 +673,11 @@
 				}
 			});
 		}
-		
+
 		function getId() {
 			return idCount++;
 		}
-		
+
 		function changeMode(mode) {
 			aceMode = mode;
 			Cookies.set('ace-mode', aceMode, {expires: 30});
@@ -755,7 +687,7 @@
 			$('#mode_' + mode).append('<div id="' + curIconMode + '" class="menu-icon icon-ok"></div>');
 			$('#showMode').html(aceMode);
 		}
-		
+
 		function changeFooter(ttl, cIndex, mIndex) {
 			$('#footer').html('<span>TTL&nbsp;:&nbsp;' + ttl + '&nbsp;&nbsp;&nbsp;&nbsp;CreateRevision&nbsp;:&nbsp;' + cIndex + '&nbsp;&nbsp;&nbsp;&nbsp;ModRevision&nbsp;:&nbsp;' + mIndex + '</span><span id="showMode" style="position: absolute;right: 10px;color: #777;">' + aceMode + '</span>');
 		}
@@ -769,22 +701,17 @@
 				editor.navigateFileStart();
 			}
 		}
-		
+
 		function changeTreeMode() {
-		    if (version === '2') {
-		        treeMode = 'path';
-                alertMessage('Etcd v2 only supports directory mode.');
+			if (treeMode === 'list') {
+				treeMode = 'path';
 			} else {
-                if (treeMode === 'list') {
-                    treeMode = 'path';
-                } else {
-                    treeMode = 'list';
-                }
-                Cookies.set('tree-mode', treeMode, {expires: 30});
-                connect();
+				treeMode = 'list';
 			}
+			Cookies.set('tree-mode', treeMode, {expires: 30});
+			connect();
 		}
-		
+
 		function changeModeBySuffix(path) {
 			var a = path.split(separator);
 			var tokens = a.slice(a.length-1,a.lenght)[0].split('.');
@@ -801,7 +728,7 @@
 				}
 			}
 		}
-		
+
 		function userOK() {
 			$('#userinfo').window('close');
 			connect();
