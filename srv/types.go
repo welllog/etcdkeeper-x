@@ -7,7 +7,7 @@ import (
 
 type userInfo struct {
 	Host   string
-	Name  string
+	Name   string
 	Passwd string
 }
 
@@ -23,10 +23,37 @@ func JsonRsp(w http.ResponseWriter, data any) {
 }
 
 type Node struct {
-	Key           string `json:"key"`
-	Dir           bool   `json:"dir,omitempty"`
-	CreatedIndex  int    `json:"createdIndex,omitempty"`
-	ModifiedIndex int    `json:"modifiedIndex,omitempty"`
-	Ttl           int    `json:"ttl"`
-	Nodes         []Node `json:"nodes"`
+	Key           string  `json:"key"`
+	Value         string  `json:"value,omitempty"`
+	Dir           bool    `json:"dir,omitempty"`
+	CreatedIndex  int64   `json:"createdIndex,omitempty"`
+	ModifiedIndex int64   `json:"modifiedIndex,omitempty"`
+	Ttl           int64   `json:"ttl,omitempty"`
+	Nodes         []*Node `json:"nodes,omitempty"`
+}
+
+type NodeRsp struct {
+	Node Node `json:"node"`
+}
+
+func (n NodeRsp) WriteTo(w http.ResponseWriter) {
+	JsonRsp(w, n)
+}
+
+type NodesRsp struct {
+	Nodes []*Node `json:"nodes"`
+}
+
+func (n NodesRsp) WriteTo(w http.ResponseWriter) {
+	JsonRsp(w, n)
+}
+
+type HostInfo struct {
+	Host string `json:"host"`
+	Name string `json:"name"`
+}
+
+type keyRange struct {
+	from string
+	end  string
 }

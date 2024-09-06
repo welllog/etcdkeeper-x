@@ -11,10 +11,10 @@ import (
 )
 
 type Session interface {
-	Set(key, value interface{}) error //set session value
-	Get(key interface{}) interface{}  //get session value
-	Delete(key interface{}) error     //delete session value
-	SessionID() string                //back current sessionID
+	Set(key string, value any) error //set session value
+	Get(key string) (any, bool)      //get session value
+	Delete(key string) error         //delete session value
+	SessionID() string               //back current sessionID
 }
 
 type Provider interface {
@@ -40,7 +40,7 @@ func Register(name string, provide Provider) {
 }
 
 type Manager struct {
-	cookieName  string     //private cookiename
+	cookieName  string //private cookiename
 	provider    Provider
 	maxlifetime int64
 }
@@ -53,7 +53,7 @@ func NewManager(provideName, cookieName string, maxlifetime int64) (*Manager, er
 	return &Manager{provider: provider, cookieName: cookieName, maxlifetime: maxlifetime}, nil
 }
 
-//get Session
+// get Session
 func (manager *Manager) SessionStart(w http.ResponseWriter, r *http.Request) (session Session) {
 	cookie, err := r.Cookie(manager.cookieName)
 	if err != nil || cookie.Value == "" {
@@ -68,7 +68,7 @@ func (manager *Manager) SessionStart(w http.ResponseWriter, r *http.Request) (se
 	return
 }
 
-//Destroy sessionid
+// Destroy sessionid
 func (manager *Manager) SessionDestroy(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(manager.cookieName)
 	if err != nil || cookie.Value == "" {

@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -32,6 +33,8 @@ func NewServer(cf Conf, assets fs.FS) *Server {
 	}
 
 	mux := http.NewServeMux()
+	// mux.Handle("GET /", http.FileServer(http.Dir("./assets")))
+	// http.FileServerFS(front)
 	mux.Handle("GET /", http.FileServerFS(front))
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("pong"))
@@ -56,7 +59,7 @@ func (s *Server) Start() {
 			resp, err := http.Get(uri)
 			if err == nil && resp.StatusCode == 200 {
 				olog.Infof("http server is ready on %s", s.srv.Addr)
-				if os.Getenv("ETCDKEEPER_X_NO_BROWSER") != "" {
+				if os.Getenv("ETCDKEEPER_X_NO_BROWSER") == "" {
 					if err := browser.OpenURL("http://" + s.srv.Addr); err != nil {
 						olog.Warnf("open browser: %v", err)
 					}
@@ -64,7 +67,7 @@ func (s *Server) Start() {
 				return
 			}
 
-			olog.Debug("Waiting for the router, retry in 1 second.")
+			olog.Debug("waiting for the router, retry in 1 second.")
 			time.Sleep(time.Second)
 		}
 
@@ -74,4 +77,12 @@ func (s *Server) Start() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.srv.Shutdown(ctx); err != nil {
+		olog.Fatalf("http server shutdown err: %s", err.Error())
+	}
+
+	olog.Info("http server shutdown")
 }

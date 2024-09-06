@@ -14,27 +14,27 @@ var p = &Provider{
 }
 
 type SessionStore struct {
-	sid          string                      // session id唯一标示
-	timeAccessed int64                       // 最后访问时间
-	values       map[interface{}]interface{} // session里面存储的值
+	sid          string         // session id唯一标示
+	timeAccessed int64          // 最后访问时间
+	values       map[string]any // session里面存储的值
 	lock         sync.Mutex
 }
 
-func (st *SessionStore) Set(key, value interface{}) error {
+func (st *SessionStore) Set(key string, value any) error {
 	st.lock.Lock()
 	st.values[key] = value
 	st.lock.Unlock()
 	return nil
 }
 
-func (st *SessionStore) Get(key interface{}) interface{} {
+func (st *SessionStore) Get(key string) (any, bool) {
 	st.lock.Lock()
-	v := st.values[key]
+	v, ok := st.values[key]
 	st.lock.Unlock()
-	return v
+	return v, ok
 }
 
-func (st *SessionStore) Delete(key interface{}) error {
+func (st *SessionStore) Delete(key string) error {
 	st.lock.Lock()
 	delete(st.values, key)
 	st.lock.Unlock()
@@ -110,7 +110,7 @@ func (pder *Provider) sessionInit(sid string) (session.Session, error) {
 	newsess := &SessionStore{
 		sid:          sid,
 		timeAccessed: time.Now().Unix(),
-		values:       make(map[interface{}]interface{}, 2),
+		values:       make(map[string]any, 2),
 	}
 
 	element := pder.list.PushBack(newsess)

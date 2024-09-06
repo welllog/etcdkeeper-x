@@ -1,32 +1,32 @@
 package srv
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/welllog/etcdkeeper-x/srv/etcdmgr"
 	"github.com/welllog/etcdkeeper-x/srv/session"
+	"github.com/welllog/golib/strz"
 	"github.com/welllog/olog"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"google.golang.org/grpc"
 )
 
 type v3Handlers struct {
-	cf      Conf
+	conf    Conf
 	sessmgr *session.Manager
-	climgr  *etcdManager
-	rootUsers *UserStore
+	climgr  *etcdmgr.EtcdManager
 }
 
-func newV3Handlers(cf Conf) (*v3Handlers, error) {
-	sessmgr, err := session.NewManager("memory", "_etcdkeeper_session", 86400)
+func newV3Handlers(conf Conf) (*v3Handlers, error) {
+	sessmgr, err := session.NewManager("memory", "_etcdkeeper_session", 3600)
 	if err != nil {
 		return nil, err
 	}
@@ -35,675 +35,558 @@ func newV3Handlers(cf Conf) (*v3Handlers, error) {
 		sessmgr.GC()
 	})
 
-	rootUsers := newUserStore()
-	if err := rootUsers.Load(); err != nil {
-		return nil, err
-	}
-
 	return &v3Handlers{
-		cf:      cf,
+		conf:    conf,
 		sessmgr: sessmgr,
-		climgr: newEtcdManager(),
-		rootUsers:   newUserStore(),
+		climgr:  etcdmgr.NewEtcdManager(3780),
 	}, nil
 }
 
-func (h *v3Handlers) Separator(w http.ResponseWriter, r *http.Request) {
-	_, _ = w.Write([]byte(h.cf.Etcds[0].Separator))
+func (h *v3Handlers) Hosts(w http.ResponseWriter, r *http.Request) {
+	hosts := make([]HostInfo, len(h.conf.Etcds))
+	for i := range h.conf.Etcds {
+		hosts[i] = HostInfo{
+			Host: h.conf.Etcds[i].Endpoints,
+			Name: h.conf.Etcds[i].Name,
+		}
+	}
+
+	Rsp{"hosts": hosts}.WriteTo(w)
 }
 
 func (h *v3Handlers) Connect(w http.ResponseWriter, r *http.Request) {
 	sess := h.sessmgr.SessionStart(w, r)
 	cuinfo := userInfo{
-		Host:  r.FormValue("host"),
-		Name: r.FormValue("uname"),
+		Host:   r.FormValue("host"),
+		Name:   r.FormValue("uname"),
 		Passwd: r.FormValue("passwd"),
 	}
 
 	logger := olog.WithEntries(olog.GetLogger(), map[string]any{
 		"method": r.Method,
-		"host":  cuinfo.Host,
-		"uname": cuinfo.Name,
+		"host":   cuinfo.Host,
+		"uname":  cuinfo.Name,
 	})
 
-	ctx := r.Context()
-	userHostLoginKey := fmt.Sprintf("%s:%s", cuinfo.Host, cuinfo.Name)
-	loginInfo := sess.Get(userHostLoginKey)
-	if loginInfo != nil {
-		// user login current etcd host
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
 
-	// start login
-	cf, ok := h.cf.GetEtcdConfig(cuinfo.Host)
-	if !ok {
-		// not found etcd config of host, use default
-		cf.Default()
-		cf.Endpoints = cuinfo.Host
-	}
+	value, ok := sess.Get(cuinfo.Host)
+	if ok { // user login current etcd host
+		uinfo := value.(*userInfo)
 
-	if cf.Auth {
-		rootCli, ok := h.climgr.GetClient(cuinfo.Host, true)
+		if cuinfo.Name != "" && uinfo.Name != cuinfo.Name {
+			// user switch
+			goto login
+		}
+
+		cliKey := genCliKey(cuinfo.Host, uinfo.Name)
+		cli, ok := h.climgr.GetClient(cliKey)
 		if !ok {
-			// root client not exists, check root user exists in config
-			if cf.Passwd != "" {
-				cf.User = "root"
-				cli, err := newEtcdClient(cf)
+			// current host client not exists
+			goto login
+		}
+
+		info, err := h.getEtcdInfo(ctx, cli, cuinfo.Host)
+		if err != nil {
+			logger.Warnf("login user get etcd info err: %v", err)
+			Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
+			return
+		}
+
+		_ = sess.Set("host", cuinfo.Host)
+		Rsp{"status": "running", "info": info}.WriteTo(w)
+		return
+	}
+
+login:
+	cliKey := genCliKey(cuinfo.Host, cuinfo.Name)
+	var closeNewCli bool
+	cli, reuse := h.climgr.GetClient(cliKey)
+	if !reuse {
+		cf, ok := h.conf.GetEtcdConfig(cuinfo.Host)
+		if !ok {
+			cf.Endpoints = cuinfo.Host
+		}
+
+		var err error
+		cli, err = newEtcdClient(cuinfo.Name, cuinfo.Passwd, cf)
+		if err != nil {
+			logger.Warnf("%s connect %s failed: %v", cuinfo.Name, cf.Endpoints, err)
+			if isEtcdServerErr(err) {
+				Rsp{"status": "login", "message": err.Error()}.WriteTo(w)
+			} else {
+				Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
+			}
+			return
+		}
+
+		logger.Debugf("%s connect %s success", cuinfo.Name, cf.Endpoints)
+
+		defer func() {
+			if closeNewCli {
+				_ = cli.Close()
+			}
+		}()
+
+		// check password
+		if cuinfo.Name == "" {
+			// etcd may not open auth
+			_, err = cli.AuthStatus(ctx)
+		} else {
+			// get user info to check password
+			_, err = cli.UserGet(ctx, cuinfo.Name)
+		}
+
+		if err != nil {
+			closeNewCli = true
+			logger.Warnf("auth failed: %v", err)
+			if isEtcdServerErr(err) {
+				Rsp{"status": "login", "message": err.Error()}.WriteTo(w)
+			} else {
+				Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
+			}
+			return
+		}
+
+	} else {
+		// client already exists, check current user password
+		if cli.Password != "" {
+			if cuinfo.Passwd == "" {
+				Rsp{"status": "login", "message": "Password required"}.WriteTo(w)
+				return
+			}
+
+			if cli.Password != cuinfo.Passwd {
+				_, err := cli.Authenticate(ctx, cuinfo.Name, cuinfo.Passwd)
 				if err != nil {
-					
+					logger.Warnf("auth failed: %v", err)
+					if isEtcdServerErr(err) {
+						Rsp{"status": "login", "message": err.Error()}.WriteTo(w)
+					} else {
+						Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
+					}
+					return
 				}
 			}
-
-			if cuinfo.Name != "root" || cuinfo.Passwd == "" {
-				Rsp{"status": "root"}.WriteTo(w)
-				return
-			}
-
-			// as root user login
-			cf.User = cuinfo.Name
-			cf.Passwd = cuinfo.Passwd
-		} else {
-
-		}
-
-		// need username and password
-		if cuinfo.Name == "" || cuinfo.Passwd == "" {
-			Rsp{"status": "login"}.WriteTo(w)
-			return
-		}
-
-		if cf.Passwd == "" {
-			if cuinfo.Name != "root" {
-				Rsp{"status": "root"}.WriteTo(w)
-				return
-			}
-
-			if cuinfo.Passwd == "" {
-				Rsp{"status": "root"}.WriteTo(w)
-				return
-			}
-
-
-			cf.User = cuinfo.Name
-			cf.Passwd = cuinfo.Passwd
-			cli, err := newEtcdClient(cf)
-			if err != nil {
-				logger.Warnf("new etcd client: %v", err)
-				Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
-				return
-			}
-
-			stResp, err := cli.Status(ctx, cuinfo.Host)
-			if err != nil {
-				logger.Warnf("etcd status: %v", err)
-				Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
-				cli.Close()
-				return
-			}
-
-
 		}
 	}
 
-	// copy config
-	ucf := cf
-	ucf.User = cuinfo.Name
-	ucf.Passwd = cuinfo.Passwd
-	ucli, err := newEtcdClient(ucf)
+	info, err := h.getEtcdInfo(ctx, cli, cuinfo.Host)
 	if err != nil {
-		logger.Warnf("new etcd client: %v", err)
+		closeNewCli = true
+		logger.Warnf("get etcd info err: %v", err)
 		Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
 		return
 	}
 
-	authRsp, err := ucli.AuthStatus(ctx)
-	if err != nil {
-		logger.Warnf("auth status: %v", err)
-		Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
-		return
-	}
-
-	if !authRsp.Enabled {
-		// reuse this client globally
-		h.climgr.SetClient(cuinfo.Host, true, ucli)
-	}
-
-	if cuinfo.Name != "root" {
-		// check root client is exists
-	}
-
-
-	if cf.Auth {
-		// need auth
-		if cf.Passwd == "" {
-			// config not root user
-			if cuinfo.Name != "root" {
-				Rsp{"status": "root"}.WriteTo(w)
-			}
-
-			// as root user login
-			cf.Passwd = cuinfo.Passwd
-			cli, err := newEtcdClient(cf)
-			if err != nil {
-
-			}
-		}
-	}
-	// need auth
-	if h.cf.Auth {
-		// first check root user
-		_, ok := h.rootUsers.Get(cuinfo.Host)
-		if !ok {
-			// check current user whether is root
-			uinfo := sess.Get(cuinfo.Host)
-			if uinfo == nil { // need login
-				Rsp{"status": "root"}.WriteTo(w)
-			}
-		}
-		if !ok && cuinfo.Name != "root" { // no root user
-			Rsp{"status": "root"}.WriteTo(w)
-			return
-		}
-
-		if uname == "" || passwd == "" {
-			Rsp{"status": "login"}.WriteTo(w)
-			return
+	// set login user info
+	_ = sess.Set(cuinfo.Host, &cuinfo)
+	_ = sess.Set("host", cuinfo.Host)
+	// store client
+	if !reuse {
+		if !h.climgr.SetClientNX(cliKey, cli) {
+			// client already exists, close the new client
+			closeNewCli = true
 		}
 	}
 
-	if uinfo, ok := sess.Get("uinfo").(*userInfo); ok {
-		if host == uinfo.host && uname == uinfo.uname && passwd == uinfo.passwd {
-			info := h.getInfo(host)
-			Rsp{"status": "running", "info": info}.WriteTo(w)
-			return
-		}
-	}
-
-	uinfo := &userInfo{host: host, uname: uname, passwd: passwd}
-	c, err := h.newClient(uinfo)
-	if err != nil {
-		olog.Warnf("method: %s, connect fail: %v", r.Method, err)
-		Rsp{"status": "error", "message": err.Error()}.WriteTo(w)
-		return
-	}
-
-	defer c.Close()
-	_ = sess.Set("uinfo", uinfo)
-
-	if h.cf.Auth {
-		if uname == "root" {
-			h.setUser(host, uinfo)
-		}
-	} else {
-		h.setUser(host, uinfo)
-	}
-
-	olog.Debugf("%s v3 connect success.", r.Method)
-	info := h.getInfo(host)
 	Rsp{"status": "running", "info": info}.WriteTo(w)
 }
 
 func (h *v3Handlers) Put(w http.ResponseWriter, r *http.Request) {
-	cli := h.getClient(w, r)
-	defer cli.Close()
+	cli, abort := h.getCli(w, r)
+	if abort {
+		return
+	}
 
 	key := r.FormValue("key")
 	value := r.FormValue("value")
 	ttl := r.FormValue("ttl")
-	olog.Debugf("PUT v3 %s", key)
 
+	logger := olog.WithEntries(olog.GetLogger(), map[string]any{
+		"method": r.Method,
+		"host":   cli.Endpoints()[0],
+		"uname":  cli.Username,
+		"key":    key,
+	})
+
+	logger.Debug("PUT v3")
+
+	ctx := r.Context()
+	var putRsp *clientv3.PutResponse
 	var err error
-	data := make(map[string]interface{})
+	var sec int64
+
 	if ttl != "" {
-		var sec int64
 		sec, err = strconv.ParseInt(ttl, 10, 64)
 		if err != nil {
-			olog.Warnf("parse ttl: %v", err)
-		}
-
-		var leaseResp *clientv3.LeaseGrantResponse
-		leaseResp, err = cli.Grant(context.TODO(), sec)
-		if err == nil && leaseResp != nil {
-			_, err = cli.Put(context.Background(), key, value, clientv3.WithLease(leaseResp.ID))
-		}
-	} else {
-		_, err = cli.Put(context.Background(), key, value)
-	}
-
-	if err != nil {
-		data["errorCode"] = 500
-		data["message"] = err.Error()
-	} else {
-		if resp, err := cli.Get(context.Background(), key); err != nil {
-			data["errorCode"] = 500
-			data["errorCode"] = err.Error()
-		} else {
-			if resp.Count > 0 {
-				kv := resp.Kvs[0]
-				node := make(map[string]interface{})
-				node["key"] = string(kv.Key)
-				node["value"] = string(kv.Value)
-				node["dir"] = false
-				node["ttl"] = getTTL(cli, kv.Lease)
-				node["createdIndex"] = kv.CreateRevision
-				node["modifiedIndex"] = kv.ModRevision
-				data["node"] = node
-			}
-		}
-	}
-
-	Rsp(data).WriteTo(w)
-}
-
-func (h *v3Handlers) Get(w http.ResponseWriter, r *http.Request) {
-	data := make(map[string]interface{})
-	key := r.FormValue("key")
-	olog.Debugf("GET v3 %s", key)
-
-	var cli *clientv3.Client
-	sess := h.sessmgr.SessionStart(w, r)
-	v := sess.Get("uinfo")
-	var uinfo *userInfo
-	if v != nil {
-		uinfo = v.(*userInfo)
-		cli, _ = h.newClient(uinfo)
-		defer cli.Close()
-
-		permissions, e := h.getPermissionPrefix(uinfo.host, uinfo.uname, key)
-		if e != nil {
-			io.WriteString(w, e.Error())
+			logger.Warnf("parse ttl: %v", err)
+			Rsp{"errorCode": 500, "message": "ttl parse failed: " + err.Error()}.WriteTo(w)
 			return
 		}
 
-		if r.FormValue("prefix") == "true" {
-			pnode := make(map[string]interface{})
-			pnode["key"] = key
-			pnode["nodes"] = make([]map[string]interface{}, 0)
-			for _, p := range permissions {
-				var (
-					resp *clientv3.GetResponse
-					err  error
-				)
-				if p[1] != "" {
-					prefixKey := p[0]
-					resp, err = cli.Get(context.Background(), prefixKey, clientv3.WithPrefix())
-				} else {
-					resp, err = cli.Get(context.Background(), p[0])
-				}
-				if err != nil {
-					data["errorCode"] = 500
-					data["message"] = err.Error()
-				} else {
-					for _, kv := range resp.Kvs {
-						node := make(map[string]interface{})
-						node["key"] = string(kv.Key)
-						node["value"] = string(kv.Value)
-						node["dir"] = false
-						if key == string(kv.Key) {
-							node["ttl"] = getTTL(cli, kv.Lease)
-						} else {
-							node["ttl"] = 0
-						}
-						node["createdIndex"] = kv.CreateRevision
-						node["modifiedIndex"] = kv.ModRevision
-						nodes := pnode["nodes"].([]map[string]interface{})
-						pnode["nodes"] = append(nodes, node)
-					}
-				}
+		var leaseResp *clientv3.LeaseGrantResponse
+		leaseResp, err = cli.Grant(ctx, sec)
+		if err != nil {
+			logger.Warnf("grant lease failed: %v", err)
+			Rsp{"errorCode": 500, "message": "grant lease failed: " + err.Error()}.WriteTo(w)
+			return
+		}
+
+		putRsp, err = cli.Put(ctx, key, value, clientv3.WithLease(leaseResp.ID), clientv3.WithPrevKV())
+	} else {
+		putRsp, err = cli.Put(ctx, key, value, clientv3.WithPrevKV())
+	}
+
+	if err != nil {
+		logger.Warnf("put failed: %v", err)
+		Rsp{"errorCode": 500, "message": "put failed: " + err.Error()}.WriteTo(w)
+		return
+	}
+
+	createdIndex := int64(0)
+	modifiedIndex := int64(0)
+	if putRsp.PrevKv != nil {
+		createdIndex = putRsp.PrevKv.CreateRevision + 1
+		modifiedIndex = putRsp.PrevKv.ModRevision + 1
+	}
+
+	NodeRsp{
+		Node: Node{
+			Key:           key,
+			Value:         value,
+			Ttl:           sec,
+			CreatedIndex:  createdIndex,
+			ModifiedIndex: modifiedIndex,
+		},
+	}.WriteTo(w)
+}
+
+func (h *v3Handlers) Get(w http.ResponseWriter, r *http.Request) {
+	cli, abort := h.getCli(w, r)
+	if abort {
+		return
+	}
+
+	key := r.FormValue("key")
+	withPrefix := r.FormValue("prefix") == "true"
+
+	logger := olog.WithEntries(olog.GetLogger(), map[string]any{
+		"method": r.Method,
+		"host":   cli.Endpoints()[0],
+		"uname":  cli.Username,
+		"key":    key,
+	})
+	logger.Debug("GET v3")
+
+	ctx := r.Context()
+	if !withPrefix {
+		getRsp, err := cli.Get(ctx, key)
+		if err != nil {
+			logger.Warnf("get failed: %v", err)
+			Rsp{"errorCode": 500, "message": "get failed: " + err.Error()}.WriteTo(w)
+			return
+		}
+
+		if len(getRsp.Kvs) == 0 {
+			Rsp{"errorCode": 500, "message": "The key does not exist."}.WriteTo(w)
+			return
+		}
+
+		var ttl int64
+		if getRsp.Kvs[0].Lease > 0 {
+			leaseRsp, err := cli.TimeToLive(ctx, clientv3.LeaseID(getRsp.Kvs[0].Lease))
+			if err != nil {
+				logger.Warnf("get lease failed: %v", err)
+				Rsp{"errorCode": 500, "message": "get lease failed: " + err.Error()}.WriteTo(w)
+				return
 			}
-			data["node"] = pnode
-		} else {
-			if resp, err := cli.Get(context.Background(), key); err != nil {
-				data["errorCode"] = 500
-				data["message"] = err.Error()
-			} else {
-				if resp.Count > 0 {
-					kv := resp.Kvs[0]
-					node := make(map[string]interface{})
-					node["key"] = string(kv.Key)
-					node["value"] = string(kv.Value)
-					node["dir"] = false
-					node["ttl"] = getTTL(cli, kv.Lease)
-					node["createdIndex"] = kv.CreateRevision
-					node["modifiedIndex"] = kv.ModRevision
-					data["node"] = node
-				} else {
-					data["errorCode"] = 500
-					data["message"] = "The node does not exist."
-				}
+
+			ttl = leaseRsp.TTL
+		}
+		NodeRsp{
+			Node: Node{
+				Key:           key,
+				Value:         strz.UnsafeString(getRsp.Kvs[0].Value),
+				Ttl:           ttl,
+				CreatedIndex:  getRsp.Kvs[0].CreateRevision,
+				ModifiedIndex: getRsp.Kvs[0].ModRevision,
+			},
+		}.WriteTo(w)
+		return
+	}
+
+	getRsp := &clientv3.GetResponse{}
+	var err error
+	if cli.Username == "" || cli.Username == "root" {
+		getRsp, err = cli.Get(ctx, key,
+			clientv3.WithPrefix(),
+			clientv3.WithKeysOnly(),
+		)
+	} else {
+		keyRanges, err := getPermissionKeys(ctx, cli)
+		if err != nil {
+			logger.Warnf("get permission keys failed: %v", err)
+			Rsp{"errorCode": 500, "message": "get permission keys failed: " + err.Error()}.WriteTo(w)
+			return
+		}
+
+		keyRanges = slices.DeleteFunc(keyRanges, func(kr keyRange) bool {
+			return !strings.HasPrefix(kr.from, key)
+		})
+
+		for _, kr := range keyRanges {
+			rsp, err := cli.Get(ctx, kr.from,
+				clientv3.WithFromKey(),
+				clientv3.WithRange(kr.end),
+				clientv3.WithKeysOnly(),
+			)
+			if err != nil {
+				logger.Warnf("range get failed: %v", err)
+				Rsp{"errorCode": 500, "message": "range get failed: " + err.Error()}.WriteTo(w)
+				return
 			}
+
+			getRsp.Kvs = append(getRsp.Kvs, rsp.Kvs...)
 		}
 	}
 
-	Rsp(data).WriteTo(w)
+	if err != nil {
+		logger.Warnf("get failed: %v", err)
+		Rsp{"errorCode": 500, "message": "get failed: " + err.Error()}.WriteTo(w)
+		return
+	}
+
+	nodes := make([]*Node, len(getRsp.Kvs))
+	for i, kv := range getRsp.Kvs {
+		nodes[i] = &Node{
+			Key:           string(kv.Key),
+			CreatedIndex:  kv.CreateRevision,
+			ModifiedIndex: kv.ModRevision,
+		}
+	}
+
+	NodesRsp{Nodes: nodes}.WriteTo(w)
 }
 
 func (h *v3Handlers) Del(w http.ResponseWriter, r *http.Request) {
-	cli := h.getClient(w, r)
-	defer cli.Close()
+	cli, abort := h.getCli(w, r)
+	if abort {
+		return
+	}
 
 	key := r.FormValue("key")
 	dir := r.FormValue("dir")
-	olog.Debugf("DELETE v3 %s", key)
 
-	if _, err := cli.Delete(context.Background(), key); err != nil {
-		io.WriteString(w, err.Error())
+	logger := olog.WithEntries(olog.GetLogger(), map[string]any{
+		"method": r.Method,
+		"host":   cli.Endpoints()[0],
+		"uname":  cli.Username,
+		"key":    key,
+	})
+
+	logger.Debug("DELETE v3")
+
+	ctx := r.Context()
+	if _, err := cli.Delete(ctx, key); err != nil {
+		_, _ = io.WriteString(w, err.Error())
 		return
 	}
 
 	if dir == "true" {
-		if _, err := cli.Delete(context.Background(), key+separator, clientv3.WithPrefix()); err != nil {
-			io.WriteString(w, err.Error())
+		if _, err := cli.Delete(ctx, key, clientv3.WithPrefix()); err != nil {
+			_, _ = io.WriteString(w, err.Error())
 			return
 		}
 	}
 
-	io.WriteString(w, "ok")
+	_, _ = io.WriteString(w, "ok")
 }
 
 func (h *v3Handlers) GetPath(w http.ResponseWriter, r *http.Request) {
-	originKey := r.FormValue("key")
-	olog.Debugf("GET v3 %s", originKey)
+	cli, abort := h.getCli(w, r)
+	if abort {
+		return
+	}
 
-	var (
-		data = make(map[string]interface{})
-		/*
-			{1:["/"], 2:["/foo", "/foo2"], 3:["/foo/bar", "/foo2/bar"], 4:["/foo/bar/test"]}
-		*/
-		all = make(map[int][]map[string]interface{})
-		min int
-		max int
-		// prefixKey string
-	)
+	key := r.FormValue("key")
 
-	var cli *clientv3.Client
-	sess := h.sessmgr.SessionStart(w, r)
-	v := sess.Get("uinfo")
-	var uinfo *userInfo
-	if v != nil {
-		uinfo = v.(*userInfo)
-		cli, _ = h.newClient(uinfo)
-		defer cli.Close()
+	logger := olog.WithEntries(olog.GetLogger(), map[string]any{
+		"method": r.Method,
+		"host":   cli.Endpoints()[0],
+		"uname":  cli.Username,
+		"key":    key,
+	})
 
-		permissions, e := h.getPermissionPrefix(uinfo.host, uinfo.uname, originKey)
-		if e != nil {
-			io.WriteString(w, e.Error())
+	logger.Debug("GET v3")
+
+	getRsp := &clientv3.GetResponse{}
+	var err error
+	ctx := r.Context()
+	if cli.Username == "" || cli.Username == "root" {
+		getRsp, err = cli.Get(ctx, key,
+			clientv3.WithPrefix(),
+			clientv3.WithKeysOnly(),
+		)
+	} else {
+		keyRanges, err := getPermissionKeys(ctx, cli)
+		if err != nil {
+			logger.Warnf("get permission keys failed: %v", err)
+			Rsp{"errorCode": 500, "message": "get permission keys failed: " + err.Error()}.WriteTo(w)
 			return
 		}
 
-		// parent
-		var (
-			presp *clientv3.GetResponse
-			err   error
-		)
-		if originKey != separator {
-			presp, err = cli.Get(context.Background(), originKey)
-			if err != nil {
-				data["errorCode"] = 500
-				data["message"] = err.Error()
-				Rsp(data).WriteTo(w)
-				return
-			}
-		}
-		if originKey == separator {
-			min = 1
-			// prefixKey = separator
-		} else {
-			min = len(strings.Split(originKey, separator))
-			// prefixKey = originKey
-		}
-		max = min
-		all[min] = []map[string]interface{}{{"key": originKey}}
-		if presp != nil && presp.Count != 0 {
-			all[min][0]["value"] = string(presp.Kvs[0].Value)
-			all[min][0]["ttl"] = getTTL(cli, presp.Kvs[0].Lease)
-			all[min][0]["createdIndex"] = presp.Kvs[0].CreateRevision
-			all[min][0]["modifiedIndex"] = presp.Kvs[0].ModRevision
-		}
-		all[min][0]["nodes"] = make([]map[string]interface{}, 0)
+		keyRanges = slices.DeleteFunc(keyRanges, func(kr keyRange) bool {
+			return !strings.HasPrefix(kr.from, key)
+		})
 
-		for _, p := range permissions {
-			key, rangeEnd := p[0], p[1]
-			// child
-			var resp *clientv3.GetResponse
-			if rangeEnd != "" {
-				resp, err = cli.Get(context.Background(), key, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
-			} else {
-				resp, err = cli.Get(context.Background(), key, clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
-			}
+		for _, kr := range keyRanges {
+			rsp, err := cli.Get(ctx, kr.from,
+				clientv3.WithFromKey(),
+				clientv3.WithRange(kr.end),
+				clientv3.WithKeysOnly(),
+			)
 			if err != nil {
-				data["errorCode"] = 500
-				data["message"] = err.Error()
-				Rsp(data).WriteTo(w)
+				logger.Warnf("range get failed: %v", err)
+				Rsp{"errorCode": 500, "message": "range get failed: " + err.Error()}.WriteTo(w)
 				return
 			}
 
-			for _, kv := range resp.Kvs {
-				if string(kv.Key) == separator {
-					continue
-				}
-				keys := strings.Split(string(kv.Key), separator) // /foo/bar
-				for i := range keys {                            // ["", "foo", "bar"]
-					k := strings.Join(keys[0:i+1], separator)
-					if k == "" {
-						continue
-					}
-					node := map[string]interface{}{"key": k}
-					if node["key"].(string) == string(kv.Key) {
-						node["value"] = string(kv.Value)
-						if key == string(kv.Key) {
-							node["ttl"] = getTTL(cli, kv.Lease)
-						} else {
-							node["ttl"] = 0
-						}
-						node["createdIndex"] = kv.CreateRevision
-						node["modifiedIndex"] = kv.ModRevision
-					}
-					level := len(strings.Split(k, separator))
-					if level > max {
-						max = level
-					}
-
-					if _, ok := all[level]; !ok {
-						all[level] = make([]map[string]interface{}, 0)
-					}
-					levelNodes := all[level]
-					var isExist bool
-					for _, n := range levelNodes {
-						if n["key"].(string) == k {
-							isExist = true
-						}
-					}
-					if !isExist {
-						node["nodes"] = make([]map[string]interface{}, 0)
-						all[level] = append(all[level], node)
-					}
-				}
-			}
+			getRsp.Kvs = append(getRsp.Kvs, rsp.Kvs...)
 		}
 
-		// parent-child mapping
-		for i := max; i > min; i-- {
-			for _, a := range all[i] {
-				for _, pa := range all[i-1] {
-					if i == 2 {
-						pa["nodes"] = append(pa["nodes"].([]map[string]interface{}), a)
-						pa["dir"] = true
-					} else {
-						if strings.HasPrefix(a["key"].(string), pa["key"].(string)+separator) {
-							pa["nodes"] = append(pa["nodes"].([]map[string]interface{}), a)
-							pa["dir"] = true
-						}
-					}
-				}
-			}
-		}
 	}
-	data = all[min][0]
 
-	Rsp{"node": data}.WriteTo(w)
+	if err != nil {
+		logger.Warnf("get failed: %v", err)
+		Rsp{"errorCode": 500, "message": "get failed: " + err.Error()}.WriteTo(w)
+		return
+	}
+
+	cf, ok := h.conf.GetEtcdConfig(cli.Endpoints()[0])
+	if !ok {
+		cf.Separator = "/"
+	}
+
+	nodes, _ := buildNodes([]byte(key), []byte(cf.Separator), 0, getRsp.Kvs)
+	NodesRsp{Nodes: nodes}.WriteTo(w)
 }
 
-func (h *v3Handlers) getUser(host string) (*userInfo, bool) {
-	h.mu.RLock()
-	u, ok := h.users[host]
-	h.mu.RUnlock()
-
-	return u, ok
-}
-
-func (h *v3Handlers) setUser(host string, u *userInfo) {
-	h.mu.Lock()
-	h.users[host] = u
-	h.mu.Unlock()
-}
-
-func (h *v3Handlers) getInfo(host string) map[string]string {
-	info := make(map[string]string)
-	uinfo, _ := h.getUser(host)
-
-	rootClient, err := h.newClient(uinfo)
+func (h *v3Handlers) getEtcdInfo(ctx context.Context, cli *clientv3.Client, host string) (map[string]string, error) {
+	stRsp, err := cli.Status(ctx, host)
 	if err != nil {
-		olog.Errorf("new client: %v", err)
-		return info
-	}
-	defer rootClient.Close()
-
-	status, err := rootClient.Status(context.Background(), host)
-	if err != nil {
-		olog.Fatalf("etcd status: %v", err)
+		return nil, err
 	}
 
-	mems, err := rootClient.MemberList(context.Background())
+	mbRsp, err := cli.MemberList(ctx)
 	if err != nil {
-		olog.Fatalf("etcd member list: %v", err)
+		return nil, err
 	}
 
-	kb := 1024
-	mb := kb * 1024
-	gb := mb * 1024
-	for _, m := range mems.Members {
-		if m.ID == status.Leader {
-			info["version"] = status.Version
-			gn, rem1 := size(int(status.DbSize), gb)
-			mn, rem2 := size(rem1, mb)
-			kn, bn := size(rem2, kb)
+	info := make(map[string]string, 3)
+	info["version"] = stRsp.Version
+	info["sizeInUse"] = sizeFormat(stRsp.DbSizeInUse)
+	info["size"] = sizeFormat(stRsp.DbSize)
 
-			if gn > 0 {
-				info["size"] = fmt.Sprintf("%dG", gn)
-			} else {
-				if mn > 0 {
-					info["size"] = fmt.Sprintf("%dM", mn)
-				} else {
-					if kn > 0 {
-						info["size"] = fmt.Sprintf("%dK", kn)
-					} else {
-						info["size"] = fmt.Sprintf("%dByte", bn)
-					}
-				}
-			}
+	for _, m := range mbRsp.Members {
+		if m.ID == stRsp.Leader {
 			info["name"] = m.GetName()
 			break
 		}
 	}
-	return info
+
+	return info, nil
 }
 
-func (h *v3Handlers) newClient(uinfo *userInfo) (*clientv3.Client, error) {
-	endpoints := []string{uinfo.host}
-	var err error
+func (h *v3Handlers) getCli(w http.ResponseWriter, r *http.Request) (*clientv3.Client, bool) {
+	abortRsp := Rsp{"errorCode": 500, "message": "Please connect to etcd first"}
 
-	// use tls if usetls is true
-	var tlsConfig *tls.Config
-	if h.cf.Tls.Enable {
-		tlsInfo := transport.TLSInfo{
-			CertFile:      h.cf.Tls.CertFile,
-			KeyFile:       h.cf.Tls.KeyFile,
-			TrustedCAFile: h.cf.Tls.TrustedCAFile,
-		}
-		tlsConfig, err = tlsInfo.ClientConfig()
-		if err != nil {
-			olog.Errorf("tls config: %v", err)
-		}
-	}
-
-	conf := clientv3.Config{
-		Endpoints:          endpoints,
-		DialTimeout:        time.Second * time.Duration(h.cf.ConnectTimeout),
-		TLS:                tlsConfig,
-		DialOptions:        []grpc.DialOption{grpc.WithBlock()},
-		MaxCallSendMsgSize: h.cf.SendMsgSize,
-	}
-
-	if h.cf.Auth {
-		conf.Username = uinfo.uname
-		conf.Password = uinfo.passwd
-	}
-
-	var c *clientv3.Client
-	c, err = clientv3.New(conf)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-func (h *v3Handlers) getClient(w http.ResponseWriter, r *http.Request) *clientv3.Client {
 	sess := h.sessmgr.SessionStart(w, r)
-	v := sess.Get("uinfo")
-	if v != nil {
-		uinfo := v.(*userInfo)
-		c, _ := h.newClient(uinfo)
-		return c
+	host, ok := sess.Get("host")
+	if !ok {
+		abortRsp.WriteTo(w)
+		return nil, true
 	}
-	return nil
+
+	infoValue, ok := sess.Get(host.(string))
+	if !ok {
+		abortRsp.WriteTo(w)
+		return nil, true
+	}
+
+	cliKey := genCliKey(host.(string), infoValue.(*userInfo).Name)
+	cli, ok := h.climgr.GetClient(cliKey)
+	if !ok {
+		abortRsp.WriteTo(w)
+		return nil, true
+	}
+
+	return cli, false
 }
 
-func (h *v3Handlers) getPermissionPrefix(host, uname, key string) ([][]string, error) {
-	if !h.cf.Auth {
-		return [][]string{{key, "p"}}, nil // No auth return all
-	} else {
-		if uname == "root" {
-			return [][]string{{key, "p"}}, nil
-		}
+func genCliKey(host, user string) string {
+	return fmt.Sprintf("%s-%s", host, user)
+}
 
-		rootUser, _ := h.getUser(host)
-		rootCli, err := h.newClient(rootUser)
+func getPermissionKeys(ctx context.Context, cli *clientv3.Client) ([]keyRange, error) {
+	ursp, err := cli.UserGet(ctx, cli.Username)
+	if err != nil {
+		return nil, fmt.Errorf("get user failed: %w", err)
+	}
+
+	keys := make([]keyRange, 0, 4)
+	for _, role := range ursp.Roles {
+		rrsp, err := cli.RoleGet(ctx, role)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get role failed: %w", err)
 		}
-		defer rootCli.Close()
 
-		if resp, err := rootCli.UserList(context.Background()); err != nil {
-			return nil, err
-		} else {
-			// Find user permissions
-			set := make(map[string]string)
-			for _, u := range resp.Users {
-				if u == uname {
-					ur, err := rootCli.UserGet(context.Background(), u)
-					if err != nil {
-						return nil, err
-					}
-
-					for _, r := range ur.Roles {
-						rr, err := rootCli.RoleGet(context.Background(), r)
-						if err != nil {
-							return nil, err
-						}
-
-						for _, p := range rr.Perm {
-							set[string(p.Key)] = string(p.RangeEnd)
-						}
-					}
-					break
-				}
+		for _, p := range rrsp.Perm {
+			if p.PermType == clientv3.PermReadWrite || p.PermType == clientv3.PermRead {
+				keys = append(keys, keyRange{
+					from: string(p.Key),
+					end:  string(p.RangeEnd),
+				})
 			}
-
-			var pers [][]string
-			for k, v := range set {
-				pers = append(pers, []string{k, v})
-			}
-			return pers, nil
 		}
 	}
+
+	return keys, nil
+}
+
+func buildNodes(prefix, separator []byte, idx int, kvs []*mvccpb.KeyValue) ([]*Node, int) {
+	var nodes []*Node
+	i := idx
+	for i < len(kvs) {
+		kv := kvs[i]
+		if !bytes.HasPrefix(kv.Key, prefix) {
+			return nodes, i - idx
+		}
+
+		rest := kv.Key[len(prefix):]
+		offset := bytes.Index(rest, separator)
+		if offset < 0 || offset == len(rest)-1 {
+			nodes = append(nodes, &Node{
+				Key:           strz.UnsafeString(kv.Key),
+				CreatedIndex:  kv.CreateRevision,
+				ModifiedIndex: kv.ModRevision,
+			})
+			i++
+			continue
+		}
+
+		offset = offset + len(prefix) + 1
+		node := &Node{
+			Key: strz.UnsafeString(kv.Key[:offset]),
+			Dir: true,
+		}
+		children, n := buildNodes(kv.Key[:offset], separator, i, kvs)
+		node.Nodes = children
+		nodes = append(nodes, node)
+
+		i += n
+	}
+
+	return nodes, i
 }
