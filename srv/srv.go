@@ -18,7 +18,8 @@ import (
 )
 
 type Server struct {
-	srv http.Server
+	srv   http.Server
+	debug bool
 }
 
 func NewServer(cf Conf, assets fs.FS) *Server {
@@ -33,16 +34,21 @@ func NewServer(cf Conf, assets fs.FS) *Server {
 	}
 
 	mux := http.NewServeMux()
-	// mux.Handle("GET /", http.FileServer(http.Dir("./assets")))
-	// http.FileServerFS(front)
-	mux.Handle("GET /", http.FileServerFS(front))
+	if cf.Debug {
+		mux.Handle("GET /", http.FileServer(http.Dir("./assets")))
+		http.FileServerFS(front)
+	} else {
+		mux.Handle("GET /", http.FileServerFS(front))
+	}
+
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("pong"))
 	})
 	bindV3Router(mux, v3)
 
 	return &Server{
-		srv: http.Server{Addr: cf.Host + ":" + strconv.Itoa(cf.Port), Handler: mux},
+		srv:   http.Server{Addr: cf.Host + ":" + strconv.Itoa(cf.Port), Handler: mux},
+		debug: cf.Debug,
 	}
 }
 
@@ -59,7 +65,7 @@ func (s *Server) Start() {
 			resp, err := http.Get(uri)
 			if err == nil && resp.StatusCode == 200 {
 				olog.Infof("http server is ready on %s", s.srv.Addr)
-				if os.Getenv("ETCDKEEPER_X_NO_BROWSER") == "" {
+				if os.Getenv("ETCDKEEPER_X_NO_BROWSER") == "" && !s.debug {
 					if err := browser.OpenURL("http://" + s.srv.Addr); err != nil {
 						olog.Warnf("open browser: %v", err)
 					}

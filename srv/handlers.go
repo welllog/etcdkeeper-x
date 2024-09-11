@@ -567,11 +567,13 @@ func buildNodes(prefix, separator []byte, idx int, kvs []*mvccpb.KeyValue) ([]*N
 		rest := kv.Key[len(prefix):]
 		offset := bytes.Index(rest, separator)
 		if offset < 0 || offset == len(rest)-1 {
-			nodes = append(nodes, &Node{
-				Key:           strz.UnsafeString(kv.Key),
-				CreatedIndex:  kv.CreateRevision,
-				ModifiedIndex: kv.ModRevision,
-			})
+			if len(rest) > 0 {
+				nodes = append(nodes, &Node{
+					Key:           strz.UnsafeString(kv.Key),
+					CreatedIndex:  kv.CreateRevision,
+					ModifiedIndex: kv.ModRevision,
+				})
+			}
 			i++
 			continue
 		}

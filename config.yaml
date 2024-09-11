@@ -1,5 +1,8 @@
 host: 0.0.0.0
 port: 8010
+# Debug mode. When true, HTML and JS files will be read from local files.
+# Enable debug mode. Requires running the program in the current project directory.
+debug:
 # log level: debug, info, warn, error, fatal
 loglevel:
 etcds:
