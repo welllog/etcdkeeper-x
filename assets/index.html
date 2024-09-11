@@ -503,7 +503,7 @@
 			var node = $('#etree').tree('getSelected');
 			var nodePath = node.path;
 			var createNodePath = $('#name').textbox('getValue');
-			createNodePath = createNodePath.replace(/(^\s*)|(\s*$)/g, "");
+			createNodePath = createNodePath.trim();
 
 			if (treeMode == 'list') { // list mode
 				if ($('#cnodeForm').form('validate')) {
