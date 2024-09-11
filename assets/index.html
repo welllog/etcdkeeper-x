@@ -727,6 +727,13 @@
 		}
 
 		function customYamlLint(content) {
+			try {
+				JSON.parse(content);
+				return [];
+			} catch (e) {
+				// do nothing
+			}
+
 			const lines = content.split('\n');
 			let firstLine = '';
 			let firstLineNumber = -1;
