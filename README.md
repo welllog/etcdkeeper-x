@@ -1,12 +1,16 @@
+<p align="center">
+    <br> English | <a href="README-CN.md">中文</a>
+</p>
+
 ![image](logo/logo-horizontal.png)
 ## ETCD Keeper-x
 This is a fork of the original etcdkeeper project. The original project can be found [here](https://github.com/evildecay/etcdkeeper). Compared to the original version, this project has made the following changes:
 * Removed support for etcd v2, retaining only support for etcd v3.
-* Modified the display of the key list to show keys without the "/" prefix.
-* Enhanced support for YAML format, including validation of YAML correctness.
-* Improved etcd client reuse and proper recycling, reducing the number of connections between etcdkeeper and etcd.
-* Configuration items are managed through a configuration file, with the startup parameter only supporting the `-c` parameter to specify the configuration file path. If the configuration file does not exist, a default configuration will be used.
-* Multiple etcd addresses can be configured through the configuration file, and the current etcd address can be selected through a dropdown box. Direct editing of the etcd address for connection is also supported.
+* Modified the key list display to include keys without the "/" prefix.
+* Enhanced support for YAML format, including validation of YAML correctness and formatting, and support for conversion between yaml and json.
+* Improved the reuse and recycling mechanism of the etcd client, reducing the number of connections between etcdkeeper and etcd.
+* Configuration items are managed through a configuration file, and the startup parameter only supports the `-c` parameter to specify the configuration file path. If the default configuration file (./config.yaml) does not exist, the default configuration will be used.
+* Multiple etcd addresses can be configured, and the current etcd address can be selected from a drop-down list. Directly editing the etcd address for connection is also supported.
 
 ## Installation
 
@@ -28,7 +32,7 @@ This is a fork of the original etcdkeeper project. The original project can be f
 
 3. Run the project:
     ```sh
-    ./etcdkeeper-x [-c config.yaml]
+    ./etcdkeeper-x [-c /somepath/config.yaml]
     ```
 
 ### Docker
@@ -45,7 +49,8 @@ This is a fork of the original etcdkeeper project. The original project can be f
     docker run -d -p 8010:8010 -v somepath:/cmd/etc etcdkeeper-x
 
 ## Configuration
-The default configuration file is `config.yaml`, and the configuration file path can be specified using the `-c` parameter. Below is a sample configuration file (`config.yaml`):
+The default configuration file is `config.yaml`, and the `-c` parameter can be used to specify the configuration file path. Here is an example configuration file:
+
 ```yaml
 # etcdkeeper-x listen host
 host: 0.0.0.0
