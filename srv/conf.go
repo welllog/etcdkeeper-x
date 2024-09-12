@@ -15,6 +15,7 @@ type Etcd struct {
 type Conf struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
+	Debug    bool   `yaml:"debug"`
 	Loglevel string `yaml:"loglevel"`
 	Etcds    []Etcd `yaml:"etcds"`
 	etcds    map[string]Etcd
